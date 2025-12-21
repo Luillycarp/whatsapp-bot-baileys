@@ -1,0 +1,28 @@
+# Node modules
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Baileys session files
+auth_info_baileys/
+Session/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# OS
+Thumbs.db
