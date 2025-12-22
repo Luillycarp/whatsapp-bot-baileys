@@ -18,6 +18,7 @@ const pino = P({
 });
 
 let sock;
+let currentQR = null;
 const AUTH_PATH = './auth_info_baileys';
 
 // ========== ENDPOINTS ==========
@@ -32,6 +33,13 @@ app.get('/status', (req, res) => {
     return res.status(503).json({ error: 'WhatsApp no conectado' });
   }
   res.json({ connected: true, user: sock.user.id, jid: sock.user.id });
+});
+
+app.get('/qr', (req, res) => {
+  if (!currentQR) {
+    return res.status(503).json({ error: 'QR no disponible. El bot no está inicializando.' });
+  }
+  res.json({ qr: currentQR });
 });
 
 app.post('/send-message', async (req, res) => {
@@ -74,6 +82,8 @@ const startBaileys = async () => {
 
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect } = update;
+            if (update.qr) currentQR = update.qr;
+            if (update.qr) pino.info('📱 QR generado! Accede a /qr para obtenerlo');
       if (connection === 'open') {
         pino.info(`✅ CONECTADO! Usuario: ${sock.user.id}`);
       }
