@@ -35,11 +35,40 @@ app.get('/status', (req, res) => {
   res.json({ connected: true, user: sock.user.id, jid: sock.user.id });
 });
 
-app.get('/qr', (req, res) => {
+const QRCode = require('qrcode');
+
+app.get('/qr', async (req, res) => {
   if (!currentQR) {
-    return res.status(503).json({ error: 'QR no disponible. El bot no está inicializando.' });
+    return res.send(`
+      <html>
+        <head><meta http-equiv="refresh" content="5"></head>
+        <body style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif;">
+          <div style="text-align:center;">
+            <h2>⏳ Esperando código QR...</h2>
+            <p>El bot se está iniciando. Esta página se recargará automáticamente.</p>
+          </div>
+        </body>
+      </html>
+    `);
   }
-  res.json({ qr: currentQR });
+
+  try {
+    const url = await QRCode.toDataURL(currentQR);
+    res.send(`
+      <html>
+        <head><meta http-equiv="refresh" content="20"></head>
+        <body style="display:flex; justify-content:center; align-items:center; height:100vh; background:#f0f0f0;">
+          <div style="text-align:center; background:white; padding:20px; border-radius:10px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+            <h2 style="font-family:sans-serif; margin-bottom:10px;">Escanea este código</h2>
+            <img src="${url}" alt="QR Code" style="width:300px; height:300px;"/>
+            <p style="font-family:sans-serif; color:#666; font-size:12px;">Se actualiza automáticamente cada 20s</p>
+          </div>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    res.status(500).send('Error generando QR visual');
+  }
 });
 
 app.post('/send-message', async (req, res) => {
