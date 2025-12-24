@@ -156,23 +156,33 @@ app.get('/qr', async (req, res) => {
 app.post('/test-webhook', async (req, res) => {
   const { message } = req.body;
   const n8nWebhook = process.env.N8N_WEBHOOK_URL;
+  const hfToken = process.env.HF_ACCESS_TOKEN;
 
   if (!n8nWebhook) {
     return res.status(400).json({ error: 'La variable N8N_WEBHOOK_URL no está configurada en Render' });
   }
 
   try {
-    // Payload simulado idéntico al real
     const payload = {
-      from: 'TESTER_WEB',     // Identificador especial para que sepas que es test
+      from: 'TESTER_WEB',
       text: message || 'Test automático',
       timestamp: Math.floor(Date.now() / 1000),
       messageId: 'TEST-' + Date.now(),
       senderName: 'Usuario Web'
     };
 
+    // Configuración de Auth para Spaces Privados
+    const config = {
+      timeout: 8000,
+      headers: {}
+    };
+
+    if (hfToken) {
+      config.headers['Authorization'] = `Bearer ${hfToken}`;
+    }
+
     // Enviamos a n8n
-    const response = await axios.post(n8nWebhook, payload, { timeout: 8000 });
+    const response = await axios.post(n8nWebhook, payload, config);
 
     // Éxito
     res.json({
@@ -257,14 +267,26 @@ const startBaileys = async () => {
 
       try {
         const n8nWebhook = process.env.N8N_WEBHOOK_URL;
+        const hfToken = process.env.HF_ACCESS_TOKEN;
+
         if (!n8nWebhook) return;
+
+        // Config Auth headers para mensajes reales
+        const config = {
+          timeout: 10000,
+          headers: {}
+        };
+
+        if (hfToken) {
+          config.headers['Authorization'] = `Bearer ${hfToken}`;
+        }
 
         await axios.post(n8nWebhook, {
           from,
           text,
           timestamp: msg.messageTimestamp,
           messageId: msg.key.id
-        }, { timeout: 10000 });
+        }, config);
 
         pino.info(`✅ Enviado a n8n`);
       } catch (error) {
