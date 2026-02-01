@@ -2,9 +2,8 @@ const express = require('express');
 const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState, Browsers } = require('@whiskeysockets/baileys');
 const P = require('pino');
 const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
-const QRCode = require('qrcode');
-const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
@@ -18,115 +17,217 @@ const pino = P({
   }
 });
 
-// ========== CONFIGURACIÓN SUPABASE ==========
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://ljeqtbkjdycdrhtozvxu.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY; // DEBE ESTAR EN VARIABLES DE ENTORNO
-
-let supabase;
-if (SUPABASE_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-  pino.info('✅ Cliente Supabase inicializado');
-} else {
-  pino.warn('⚠️ FALTA SUPABASE_KEY. La funcionalidad Realtime no funcionará.');
-}
-
 let sock;
 let currentQR = null;
 const AUTH_PATH = './auth_info_baileys';
 
-// ========== HTML HELPER ==========
-const getHtml = (content) => `
-  <html>
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>WhatsApp Bot Panel</title>
-      <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f0f2f5; display: flex; flex-direction: column; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
-        .card { background: white; padding: 24px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 100%; margin-bottom: 20px; }
-        h2 { margin-top: 0; color: #1f2937; margin-bottom: 10px; }
-        img { border-radius: 8px; margin: 15px 0; max-width: 100%; }
-        p { color: #666; font-size: 14px; }
-      </style>
-    </head>
-    <body>
-       ${content}
-    </body>
-  </html>
-`;
+// ========== MCP PROTOCOL IMPLEMENTATION ==========
 
-// ========== ENDPOINTS ==========
-
-app.get('/qr', async (req, res) => {
-  if (!currentQR) {
-    return res.send(getHtml(`
-      <meta http-equiv="refresh" content="5">
-      <div class="card">
-        <h2>⏳ Iniciando Bot...</h2>
-        <p>Generando código QR...</p>
-      </div>
-    `));
+// Definición de herramientas MCP disponibles
+const MCP_TOOLS = [
+  {
+    name: 'send_whatsapp_message',
+    description: 'Envía un mensaje de WhatsApp a un número específico. Usa esta herramienta para responder mensajes de usuarios.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        number: {
+          type: 'string',
+          description: 'Número de WhatsApp del destinatario (puede incluir @s.whatsapp.net o @lid, o solo el número)'
+        },
+        message: {
+          type: 'string',
+          description: 'Texto del mensaje a enviar'
+        }
+      },
+      required: ['number', 'message']
+    }
+  },
+  {
+    name: 'get_whatsapp_status',
+    description: 'Obtiene el estado de conexión de WhatsApp',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      required: []
+    }
   }
+];
+
+// Ejecutar herramienta MCP
+async function executeTool(toolName, args) {
+  switch (toolName) {
+    case 'send_whatsapp_message': {
+      const { number, message } = args;
+
+      if (!sock?.user?.id) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: 'Error: WhatsApp no está conectado' }]
+        };
+      }
+
+      try {
+        // Normalizar JID
+        let jid = number;
+        if (!number.includes('@')) {
+          jid = `${number}@s.whatsapp.net`;
+        }
+
+        const response = await sock.sendMessage(jid, { text: message });
+        pino.info(`📤 MCP: Mensaje enviado a ${jid}`);
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              messageId: response.key.id,
+              to: jid,
+              timestamp: new Date().toISOString()
+            })
+          }]
+        };
+      } catch (error) {
+        pino.error(`❌ MCP Error: ${error.message}`);
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Error enviando mensaje: ${error.message}` }]
+        };
+      }
+    }
+
+    case 'get_whatsapp_status': {
+      const connected = !!sock?.user?.id;
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            connected,
+            user: sock?.user?.id || null,
+            hasQR: !!currentQR,
+            timestamp: new Date().toISOString()
+          })
+        }]
+      };
+    }
+
+    default:
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Herramienta desconocida: ${toolName}` }]
+      };
+  }
+}
+
+// ========== MCP ENDPOINTS (HTTP/SSE) ==========
+
+// Endpoint principal MCP (JSON-RPC over HTTP)
+app.post('/mcp', async (req, res) => {
+  const { jsonrpc, id, method, params } = req.body;
+
+  pino.info(`🔧 MCP Request: ${method}`);
+
   try {
-    const url = await QRCode.toDataURL(currentQR);
-    res.send(getHtml(`
-      <meta http-equiv="refresh" content="20">
-      <div class="card">
-        <h2>📱 Vincula tu WhatsApp</h2>
-        <img src="${url}" alt="QR Code"/>
-        <p>El código cambia cada 20 segundos</p>
-      </div>
-    `));
-  } catch (err) {
-    res.status(500).send('Error generando QR visual');
+    let result;
+
+    switch (method) {
+      case 'initialize':
+        result = {
+          protocolVersion: '2024-11-05',
+          capabilities: {
+            tools: {}
+          },
+          serverInfo: {
+            name: 'whatsapp-baileys-mcp',
+            version: '1.0.0'
+          }
+        };
+        break;
+
+      case 'tools/list':
+        result = { tools: MCP_TOOLS };
+        break;
+
+      case 'tools/call':
+        const { name, arguments: args } = params;
+        result = await executeTool(name, args || {});
+        break;
+
+      case 'ping':
+        result = {};
+        break;
+
+      default:
+        return res.json({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32601, message: `Method not found: ${method}` }
+        });
+    }
+
+    res.json({ jsonrpc: '2.0', id, result });
+
+  } catch (error) {
+    pino.error(`MCP Error: ${error.message}`);
+    res.json({
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32603, message: error.message }
+    });
   }
 });
 
-// ========== SUBSCRIPCIÓN A SUPABASE (OUTBOX) ==========
-const subscribeToOutbox = () => {
-  if (!supabase) return;
+// SSE endpoint para streaming (opcional, algunos clientes lo usan)
+app.get('/mcp/sse', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
 
-  pino.info('🔌 Conectando a Supabase Realtime (outbox_whatsapp)...');
+  // Enviar evento de conexión
+  res.write(`data: ${JSON.stringify({ type: 'connected', serverInfo: { name: 'whatsapp-baileys-mcp' } })}\n\n`);
 
-  supabase
-    .channel('outbox-listener')
-    .on(
-      'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'outbox_whatsapp' },
-      async (payload) => {
-        const newRow = payload.new;
-        pino.info(`🔔 Nuevo mensaje en Outbox! ID: ${newRow.id} -> Para: ${newRow.to_number}`);
+  // Keep-alive cada 30s
+  const keepAlive = setInterval(() => {
+    res.write(`: keep-alive\n\n`);
+  }, 30000);
 
-        if (!sock?.user?.id) {
-          pino.error('❌ WhatsApp no está conectado. No se puede enviar.');
-          return;
-        }
+  req.on('close', () => {
+    clearInterval(keepAlive);
+  });
+});
 
-        try {
-          // Enviar mensaje a WhatsApp
-          const jid = newRow.to_number.includes('@') ? newRow.to_number : `${newRow.to_number}@s.whatsapp.net`;
-          await sock.sendMessage(jid, { text: newRow.reply_body });
-          pino.info('✅ Mensaje enviado a WhatsApp exitosamente');
+// ========== ENDPOINTS LEGACY (Para compatibilidad) ==========
 
-          // Actualizar estado en Supabase
-          await supabase
-            .from('outbox_whatsapp')
-            .update({ status: 'sent' })
-            .eq('id', newRow.id);
+app.get('/health', (req, res) => {
+  const status = sock?.user?.id ? 'connected' : 'disconnected';
+  res.json({ status, user: sock?.user?.id || null, timestamp: new Date().toISOString() });
+});
 
-        } catch (err) {
-          pino.error(`❌ Error enviando mensaje: ${err.message}`);
-          await supabase
-            .from('outbox_whatsapp')
-            .update({ status: 'error: ' + err.message })
-            .eq('id', newRow.id);
-        }
-      }
-    )
-    .subscribe((status) => {
-      pino.info(`📡 Estado Supabase: ${status}`);
-    });
-};
+app.get('/status', (req, res) => {
+  if (!sock?.user?.id) {
+    return res.status(503).json({ error: 'WhatsApp no conectado' });
+  }
+  res.json({ connected: true, user: sock.user.id, jid: sock.user.id });
+});
+
+app.get('/qr', (req, res) => {
+  if (!currentQR) {
+    return res.status(503).json({ error: 'QR no disponible. El bot no está inicializando.' });
+  }
+  res.json({ qr: currentQR });
+});
+
+// Mantener endpoint legacy para backwards compatibility
+app.post('/send-message', async (req, res) => {
+  const { number, message } = req.body;
+  const result = await executeTool('send_whatsapp_message', { number, message });
+
+  if (result.isError) {
+    return res.status(500).json({ error: result.content[0].text });
+  }
+  res.json(JSON.parse(result.content[0].text));
+});
 
 // ========== BAILEYS SETUP ==========
 
@@ -137,7 +238,9 @@ const startBaileys = async () => {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
-    const { version } = await fetchLatestBaileysVersion();
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+
+    pino.info(`Baileys version: ${version.join('.')}`);
 
     sock = makeWASocket({
       version,
@@ -152,17 +255,15 @@ const startBaileys = async () => {
     sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect } = update;
       if (update.qr) currentQR = update.qr;
-
+      if (update.qr) pino.info('📱 QR generado! Accede a /qr para obtenerlo');
       if (connection === 'open') {
         pino.info(`✅ CONECTADO! Usuario: ${sock.user.id}`);
-        // Iniciar escucha de Supabase al conectar
-        subscribeToOutbox();
+        pino.info(`🔧 MCP Server listo en /mcp`);
       }
-
       if (connection === 'close') {
         const reason = new (require('@hapi/boom')).Boom(lastDisconnect?.error)?.output?.statusCode;
         if (reason !== DisconnectReason.loggedOut) {
-          pino.info('🔄 Reintentando conexión...');
+          pino.info('🔄 Reintentando...');
           setTimeout(() => startBaileys(), 3000);
         }
       }
@@ -177,41 +278,27 @@ const startBaileys = async () => {
 
       pino.info(`📨 De ${from}: ${text}`);
 
-      // 1. Enviar a n8n (WEBHOOK) - Solo para despertar/procesar
-      // MANTENEMOS ESTO PARA ALERTAR A N8N
+      // Enviar a n8n webhook (si está configurado)
       try {
         const n8nWebhook = process.env.N8N_WEBHOOK_URL;
-        const hfToken = process.env.HF_ACCESS_TOKEN;
+        if (!n8nWebhook) return;
 
-        if (n8nWebhook) {
-          const config = { headers: {} };
-          if (hfToken) config.headers['Authorization'] = `Bearer ${hfToken}`;
+        await axios.post(n8nWebhook, {
+          from,
+          text,
+          timestamp: msg.messageTimestamp,
+          messageId: msg.key.id
+        }, { timeout: 10000 });
 
-          // No esperamos respuesta (fire and forget) o timeout corto
-          axios.post(n8nWebhook, {
-            from,
-            text,
-            timestamp: msg.messageTimestamp,
-            messageId: msg.key.id
-          }, config).catch(e => pino.error(`⚠️ n8n Webhook Warning: ${e.message}`));
-        }
-      } catch (e) {
-        // Ignoramos errores de n8n para no bloquear
-      }
-
-      // 2. OPCIONAL: Guardar en 'inbox_whatsapp' también
-      if (supabase) {
-        await supabase.from('inbox_whatsapp').insert({
-          from_number: from,
-          text_body: text,
-          sender_name: msg.pushName || 'Unknown'
-        });
+        pino.info(`✅ Enviado a n8n`);
+      } catch (error) {
+        pino.error(`❌ Error n8n: ${error.message}`);
       }
     });
 
     sock.ev.on('creds.update', saveCreds);
   } catch (error) {
-    pino.error('Error Baileys:', error);
+    pino.error('Error:', error);
     setTimeout(() => startBaileys(), 5000);
   }
 };
@@ -219,5 +306,12 @@ const startBaileys = async () => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   pino.info(`🚀 Servidor en puerto ${PORT}`);
+  pino.info(`🔧 MCP Endpoint: POST /mcp`);
+  pino.info(`📡 MCP SSE: GET /mcp/sse`);
   startBaileys();
+});
+
+process.on('SIGTERM', () => {
+  pino.info('Cerrando...');
+  process.exit(0);
 });
