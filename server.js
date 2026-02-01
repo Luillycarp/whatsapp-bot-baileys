@@ -75,18 +75,17 @@ async function executeTool(toolName, args) {
           jid = `${number}@s.whatsapp.net`;
         }
 
-        const response = await sock.sendMessage(jid, { text: message });
-        pino.info(`📤 MCP: Mensaje enviado a ${jid}`);
+        // MODO ULTRA RÁPIDO: Fire and Forget
+        // Disparamos el envío pero NO esperamos a que termine para responder a n8n
+        sock.sendMessage(jid, { text: message })
+          .then(res => pino.info(`📤 MCP Async: Mensaje enviado a ${jid} ID: ${res.key.id}`))
+          .catch(err => pino.error(`❌ MCP Async Error: ${err.message}`));
 
+        // Respondemos a n8n en 1ms
         return {
           content: [{
             type: 'text',
-            text: JSON.stringify({
-              success: true,
-              messageId: response.key.id,
-              to: jid,
-              timestamp: new Date().toISOString()
-            })
+            text: JSON.stringify({ success: true, status: "queued_async" })
           }]
         };
       } catch (error) {
@@ -328,12 +327,15 @@ const startBaileys = async () => {
         const n8nWebhook = process.env.N8N_WEBHOOK_URL;
         if (!n8nWebhook) return;
 
-        await axios.post(n8nWebhook, {
+        // Fire and forget: No esperamos respuesta para no bloquear
+        axios.post(n8nWebhook, {
           from,
           text,
           timestamp: msg.messageTimestamp,
           messageId: msg.key.id
-        }, { timeout: 10000 });
+        }, { timeout: 5000 })
+          .then(() => pino.info('✅ Webhook disparado (Async)'))
+          .catch(e => pino.error(`⚠️ Webhook error: ${e.message}`));
 
         pino.info(`✅ Enviado a n8n`);
       } catch (error) {
