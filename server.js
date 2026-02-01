@@ -4,6 +4,7 @@ const P = require('pino');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const QRCode = require('qrcode');
 require('dotenv').config();
 
 const app = express();
@@ -211,11 +212,55 @@ app.get('/status', (req, res) => {
   res.json({ connected: true, user: sock.user.id, jid: sock.user.id });
 });
 
-app.get('/qr', (req, res) => {
+app.get('/qr', async (req, res) => {
+  // Página HTML con QR visual escaneable
+  const html = (content) => `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <meta http-equiv="refresh" content="20">
+      <title>WhatsApp Bot - QR</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .card { background: white; padding: 40px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; max-width: 400px; }
+        h2 { margin: 0 0 10px 0; color: #1f2937; }
+        p { color: #6b7280; margin: 10px 0; }
+        img { border-radius: 12px; margin: 20px 0; }
+        .status { padding: 8px 16px; border-radius: 20px; display: inline-block; font-weight: 600; }
+        .waiting { background: #fef3c7; color: #92400e; }
+        .ready { background: #d1fae5; color: #065f46; }
+      </style>
+    </head>
+    <body>
+      <div class="card">${content}</div>
+    </body>
+    </html>
+  `;
+
   if (!currentQR) {
-    return res.status(503).json({ error: 'QR no disponible. El bot no está inicializando.' });
+    return res.send(html(`
+      <h2>⏳ Esperando QR...</h2>
+      <p class="status waiting">Iniciando conexión</p>
+      <p>La página se actualizará automáticamente</p>
+    `));
   }
-  res.json({ qr: currentQR });
+
+  try {
+    const qrImageUrl = await QRCode.toDataURL(currentQR, { width: 300, margin: 2 });
+    res.send(html(`
+      <h2>📱 Escanea con WhatsApp</h2>
+      <img src="${qrImageUrl}" alt="QR Code" width="300" height="300"/>
+      <p class="status ready">QR listo para escanear</p>
+      <p>Abre WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+    `));
+  } catch (err) {
+    res.status(500).send(html(`
+      <h2>❌ Error</h2>
+      <p>${err.message}</p>
+    `));
+  }
 });
 
 // Mantener endpoint legacy para backwards compatibility
